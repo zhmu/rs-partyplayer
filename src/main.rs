@@ -1,8 +1,7 @@
 use std::io::{ self, BufRead, BufReader };
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::process::{ Child, Command };
+use std::process::{ self, Child, Command };
 use std::time;
 
 use rand::{ Rng, SeedableRng };
@@ -138,26 +137,23 @@ impl<'a, 'b> Player<'a, 'b> {
 }
 
 fn poll_http_server(server: &tiny_http::Server, player: &mut Player) -> io::Result<()> {
-    match server.recv_timeout(time::Duration::from_millis(500))? {
-        Some(rq) => {
-            let reply = match rq.url() {
-                "/skip" => {
-                    match player.skip() {
-                        Err(e) => format!("unable to skip track: {}", e),
-                        _ => "<html><head><meta http-equiv=\"refresh\" content=\"0; url=/\"/></head></html>".to_string()
-                    }
-                },
-                "/" => format!("current track: {}<br/><a href=\"/skip\">skip</a>", player.current_track.unwrap().display()),
-                _ => "supported request".to_string()
-            };
-            let response = tiny_http::Response::from_data(reply.to_string().into_bytes());
-            let response = response.with_header(
-                tiny_http::Header{ field: "Content-Type".parse().unwrap(), value: "text/html".parse().unwrap() }
-            );
-            rq.respond(response)
-        },
-        None => Ok(())
-    }
+    if let Some(rq) = server.recv_timeout(time::Duration::from_millis(500))? {
+        let reply = match rq.url() {
+            "/skip" => {
+                match player.skip() {
+                    Err(e) => format!("unable to skip track: {}", e),
+                    _ => "<html><head><meta http-equiv=\"refresh\" content=\"0; url=/\"/></head></html>".to_string()
+                }
+            },
+            "/" => format!("current track: {}<br/><a href=\"/skip\">skip</a>", player.current_track.unwrap().display()),
+            _ => "supported request".to_string()
+        };
+        let response = tiny_http::Response::from_data(reply.to_string().into_bytes());
+        let response = response.with_header(
+            tiny_http::Header{ field: "Content-Type".parse().unwrap(), value: "text/html".parse().unwrap() }
+        );
+        return rq.respond(response)
+    } Ok(())
 }
 
 fn main() {
@@ -174,7 +170,10 @@ fn main() {
         process::exit(1);
     });
 
-    let server = tiny_http::Server::http("0.0.0.0:8000").unwrap();
+    let server = tiny_http::Server::http("0.0.0.0:8000").unwrap_or_else(|err| {
+        println!("unable to start http server: {:#?}", err);
+        process::exit(1);
+    });
 
     let mut player = Player::new(&playlist, &mut state);
     loop {
