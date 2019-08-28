@@ -1,22 +1,17 @@
-use std::io;
-use std::io::{ BufRead, BufReader };
+use std::io::{ self, BufRead, BufReader };
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::process::{ Child, Command };
-use std::{thread, time};
+use std::time;
 
-use rand::Rng;
-use rand::SeedableRng;
+use rand::{ Rng, SeedableRng };
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-//use std::num::ParseIntError;
 
 use ini::Ini;
-//use ini::ini::Error;
 
 extern crate tiny_http;
-//use ascii::AsciiString;
 
 #[derive(Debug)]
 enum PlaylistError {
@@ -35,23 +30,20 @@ struct State {
 }
 
 impl State {
-    fn new(path: &str) -> Result<State, StateError> {
-        let seed:u64;
-        let mut index:usize = 0;
+    fn new() -> State {
+        // Generate a new random seed
+        let mut rng = rand::thread_rng();
+        let seed = rng.gen::<u64>();
+        State { seed, index: 0 }
+    }
 
-        if Path::new(path).exists() {
-            // INI file found; we'd better be able to parse it
-            let conf = Ini::load_from_file(path).map_err(StateError::Ini)?;
-            let section = conf.section(Some("general".to_owned())).unwrap();
-            seed = section.get("seed").unwrap().parse::<u64>().map_err(StateError::ParseInt)?;
-            index = section.get("index").unwrap().parse::<usize>().map_err(StateError::ParseInt)?;
-        } else {
-            // Generate a new random seed
-            let mut rng = rand::thread_rng();
-            seed = rng.gen::<u64>();
-        }
-
-        Ok(State { seed, index } )
+    fn load(&mut self, path: &str) -> Result<(), StateError> {
+        // INI file found; we'd better be able to parse it
+        let conf = Ini::load_from_file(path).map_err(StateError::Ini)?;
+        let section = conf.section(Some("general".to_owned())).unwrap();
+        self.seed = section.get("seed").unwrap().parse::<u64>().map_err(StateError::ParseInt)?;
+        self.index = section.get("index").unwrap().parse::<usize>().map_err(StateError::ParseInt)?;
+        Ok(())
     }
 
     fn write(&self, path: &str) -> Result<(), std::io::Error> {
@@ -64,8 +56,7 @@ impl State {
 }
 
 struct Playlist {
-    files: Vec<PathBuf>,
-    index: usize
+    files: Vec<PathBuf>
 }
 
 impl Playlist {
@@ -82,7 +73,7 @@ impl Playlist {
         let mut rng = StdRng::seed_from_u64(state.seed);
         files.shuffle(&mut rng);
 
-        Ok(Playlist { files, index: state.index })
+        Ok(Playlist{ files })
     }
 
     fn next(&self, state: &mut State) -> &PathBuf {
@@ -90,23 +81,19 @@ impl Playlist {
         state.index += 1;
         &self.files[n]
     }
-
-    fn print(&self, index: usize) {
-        for (i, v) in self.files.iter().enumerate() {
-            let marker = match index {
-                _ if index == i => ">>",
-                _ => "  "
-            };
-            println!("{} {}: {}", marker, i, v.display().to_string());
-        }
-    }
 }
 
 fn main() {
-    let mut state = State::new("state.ini").unwrap_or_else(|err| {
-        println!("unable to process state: {:#?}", err);
-        process::exit(1);
-    });
+    let mut state = State::new();
+    if Path::new("state.ini").exists() {
+        match state.load("state.ini") {
+            Err(err) => {
+                println!("unable to process state: {:#?}", err);
+                process::exit(1);
+            },
+            _ => { }
+        }
+    }
 
     let playlist = Playlist::new("files.txt", &state).unwrap_or_else(|err| {
         println!("unable to process playlist: {:#?}", err);
@@ -124,9 +111,10 @@ fn main() {
                     "/skip" => {
                         match &mut child {
                             Some(c) => {
-                                c.kill();
-                                c.wait();
-                                "<html><head><meta http-equiv=\"refresh\" content=\"0; url=/\"/></head></html>".to_string()
+                                match c.kill().and_then(|()| c.wait()) {
+                                    Err(e) => format!("failed: {}", e),
+                                    _ => "<html><head><meta http-equiv=\"refresh\" content=\"0; url=/\"/></head></html>".to_string()
+                                }
                             },
                             _ => "no track playing".to_string()
                         }
@@ -138,7 +126,7 @@ fn main() {
                 let response = response.with_header(
                     tiny_http::Header{ field: "Content-Type".parse().unwrap(), value: "text/html".parse().unwrap() }
                 );
-                rq.respond(response);
+                let _ = rq.respond(response);
             },
             Err(e) => { println!("http error {}", e); },
             _ => {}
@@ -147,10 +135,15 @@ fn main() {
         match &mut child {
             None => {
                 current_track = playlist.next(&mut state);
+                match state.write("state.ini") {
+                    Ok(()) => {},
+                    Err(e) => println!("unable to save state: {}", e.to_string())
+                }
+
                 println!("track {}", current_track.display());
                 match Command::new("/bin/sleep").arg("30").spawn() {
                     Ok(c) => child = Some(c),
-                    Err(e) => println!("unable to start playing: { }", e.to_string())
+                    Err(e) => println!("unable to start playing: {}", e.to_string())
                 }
             },
             Some(c) => {
@@ -167,6 +160,4 @@ fn main() {
             }
         }
     }
-
-    state.write("state.ini");
 }
