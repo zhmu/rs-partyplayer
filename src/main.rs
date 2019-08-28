@@ -83,6 +83,83 @@ impl Playlist {
     }
 }
 
+struct Player<'a, 'b> {
+    playlist: &'a Playlist,
+    state: &'b mut State,
+    child: Option::<Child>,
+    current_track: Option::<&'a PathBuf>
+}
+
+impl<'a, 'b> Player<'a, 'b> {
+    fn new(playlist: &'a Playlist, state: &'b mut State) -> Player<'a, 'b> {
+        Player{ playlist, state, child: None, current_track: None }
+    }
+
+    fn poll_child(&mut self) {
+        match &mut self.child {
+            None => {
+                self.current_track = Some(self.playlist.next(&mut self.state));
+                match self.state.write("state.ini") {
+                    Ok(()) => {},
+                    Err(e) => println!("unable to save state: {}", e.to_string())
+                }
+
+                println!("track {}", self.current_track.unwrap().display());
+                match Command::new("/bin/sleep").arg("30").spawn() {
+                    Ok(c) => self.child = Some(c),
+                    Err(e) => println!("unable to start playing: {}", e.to_string())
+                }
+            },
+            Some(c) => {
+                match c.try_wait() {
+                    Ok(Some(_)) => {
+                        /* should we care about the status here? */
+                        self.child = None;
+                    },
+                    Ok(None) => { /* no updates yet */ },
+                    Err(e) => {
+                        println!("unable to check player state: {}", e.to_string())
+                    }
+                }
+            }
+        }
+    }
+
+    fn skip(&mut self) -> io::Result<()> {
+        match &mut self.child {
+            Some(c) => {
+                c.kill()?;
+                c.wait()?;
+                return Ok(())
+            },
+            _ => Ok(()) // nothing is playing; we should pick up a new track soon
+        }
+    }
+}
+
+fn poll_http_server(server: &tiny_http::Server, player: &mut Player) -> io::Result<()> {
+    match server.recv_timeout(time::Duration::from_millis(500))? {
+        Some(rq) => {
+            let reply = match rq.url() {
+                "/skip" => {
+                    match player.skip() {
+                        Err(e) => format!("unable to skip track: {}", e),
+                        _ => "<html><head><meta http-equiv=\"refresh\" content=\"0; url=/\"/></head></html>".to_string()
+                    }
+                },
+                "/" => format!("current track: {}<br/><a href=\"/skip\">skip</a>", player.current_track.unwrap().display()),
+                _ => "supported request".to_string()
+            };
+            let response = tiny_http::Response::from_data(reply.to_string().into_bytes());
+            let response = response.with_header(
+                tiny_http::Header{ field: "Content-Type".parse().unwrap(), value: "text/html".parse().unwrap() }
+            );
+            rq.respond(response)
+        },
+        None => Ok(())
+    }
+}
+
 fn main() {
     let mut state = State::new();
     if Path::new("state.ini").exists() {
@@ -102,62 +179,12 @@ fn main() {
 
     let server = tiny_http::Server::http("0.0.0.0:8000").unwrap();
 
-    let mut child:Option::<Child> = None;
-    let mut current_track = playlist.next(&mut state);
+    let mut player = Player::new(&playlist, &mut state);
     loop {
-        match server.recv_timeout(time::Duration::from_millis(500)) {
-            Ok(Some(rq)) => {
-                let reply = match rq.url() {
-                    "/skip" => {
-                        match &mut child {
-                            Some(c) => {
-                                match c.kill().and_then(|()| c.wait()) {
-                                    Err(e) => format!("failed: {}", e),
-                                    _ => "<html><head><meta http-equiv=\"refresh\" content=\"0; url=/\"/></head></html>".to_string()
-                                }
-                            },
-                            _ => "no track playing".to_string()
-                        }
-                    },
-                    "/" => format!("current track: {}<br/><a href=\"/skip\">skip</a>", current_track.display()),
-                    _ => "supported request".to_string()
-                };
-                let response = tiny_http::Response::from_data(reply.to_string().into_bytes());
-                let response = response.with_header(
-                    tiny_http::Header{ field: "Content-Type".parse().unwrap(), value: "text/html".parse().unwrap() }
-                );
-                let _ = rq.respond(response);
-            },
-            Err(e) => { println!("http error {}", e); },
-            _ => {}
+        match poll_http_server(&server, &mut player) {
+            Err(e) => println!("error from http server: {}", e),
+            _ => ()
         }
-
-        match &mut child {
-            None => {
-                current_track = playlist.next(&mut state);
-                match state.write("state.ini") {
-                    Ok(()) => {},
-                    Err(e) => println!("unable to save state: {}", e.to_string())
-                }
-
-                println!("track {}", current_track.display());
-                match Command::new("/bin/sleep").arg("30").spawn() {
-                    Ok(c) => child = Some(c),
-                    Err(e) => println!("unable to start playing: {}", e.to_string())
-                }
-            },
-            Some(c) => {
-                match c.try_wait() {
-                    Ok(Some(_)) => {
-                        /* should we care about the status here? */
-                        child = None;
-                    },
-                    Ok(None) => { /* no updates yet */ },
-                    Err(e) => {
-                        println!("unable to check player state: {}", e.to_string())
-                    }
-                }
-            }
-        }
+        player.poll_child();
     }
 }
