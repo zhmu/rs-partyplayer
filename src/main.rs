@@ -130,7 +130,7 @@ impl<'a, 'b> Player<'a, 'b> {
             Some(c) => {
                 c.kill()?;
                 c.wait()?;
-                return Ok(())
+                Ok(())
             },
             _ => Ok(()) // nothing is playing; we should pick up a new track soon
         }
@@ -163,12 +163,9 @@ fn poll_http_server(server: &tiny_http::Server, player: &mut Player) -> io::Resu
 fn main() {
     let mut state = State::new();
     if Path::new("state.ini").exists() {
-        match state.load("state.ini") {
-            Err(err) => {
-                println!("unable to process state: {:#?}", err);
-                process::exit(1);
-            },
-            _ => { }
+        if let Err(err) = state.load("state.ini") {
+            println!("unable to process state: {:#?}", err);
+            process::exit(1);
         }
     }
 
@@ -181,9 +178,8 @@ fn main() {
 
     let mut player = Player::new(&playlist, &mut state);
     loop {
-        match poll_http_server(&server, &mut player) {
-            Err(e) => println!("error from http server: {}", e),
-            _ => ()
+        if let Err(e) = poll_http_server(&server, &mut player) {
+            println!("error from http server: {}", e)
         }
         player.poll_child();
     }
